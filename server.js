@@ -66,18 +66,25 @@ app.get("/api/health", (req, res) => {
 
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, conversation } = req.body;
+    const safeConversation = Array.isArray(conversation)
+  ? conversation.map(msg => ({
+      role: msg.role === "assistant" ? "assistant" : "user",
+      content: msg.content
+    }))
+  : [];
 
     if (!message) {
       return res.json({ reply: "What part are you looking for?" });
     }
-
+const messages = [
+  { role: "system", content: SYSTEM_INSTRUCTIONS },
+  ...safeConversation,
+  { role: "user", content: message }
+];
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: SYSTEM_INSTRUCTIONS },
-        { role: "user", content: message }
-      ],
+messages: messages,
     });
 
     const reply = response.choices[0].message.content;
