@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import OpenAI from "openai";
+import nodemailer from "nodemailer";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -401,6 +402,110 @@ messages: messages,
     res.json({
       reply: "Hey—I'm having a small issue on my side. Try again in a minute."
     });
+  }
+});
+
+
+
+function extractLeadInfo(conversation = []) {
+  const allUserText = conversation
+    .filter(msg => msg && msg.role === "user" && typeof msg.content === "string")
+    .map(msg => msg.content)
+    .join("\n");
+
+  const emailMatch = allUserText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  const phoneMatch = allUserText.match(/(?:\+?\d[\d\s().-]{7,}\d)/);
+
+  let name = "";
+  for (let i = 0; i < conversation.length - 1; i++) {
+    const current = conversation[i];
+    const next = conversation[i + 1];
+    if (
+      current &&
+      current.role === "assistant" &&
+      typeof current.content === "string" &&
+      /nombre|name/i.test(current.content) &&
+      next &&
+      next.role === "user" &&
+      typeof next.content === "string"
+    ) {
+      name = next.content.trim();
+      break;
+    }
+  }
+
+  let need = "";
+  for (const msg of conversation) {
+    if (
+      msg &&
+      msg.role === "user" &&
+      typeof msg.content === "string" &&
+      /hmi|plc|motor|sensor|heater|heater|botes|botes industriales|pantalla|cotiz|quote|packaging|mixer|molding/i.test(msg.content)
+    ) {
+      need = msg.content.trim();
+      break;
+    }
+  }
+
+  return {
+    name,
+    email: emailMatch ? emailMatch[0] : "",
+    phone: phoneMatch ? phoneMatch[0] : "",
+    need
+  };
+}
+
+app.post("/api/send-transcript", async (req, res) => {
+  try {
+    const { conversation } = req.body || {};
+
+    if (!Array.isArray(conversation) || conversation.length === 0) {
+      return res.status(400).json({ success: false, error: "Missing conversation" });
+    }
+
+    const lead = extractLeadInfo(conversation);
+
+    const transcript = conversation
+      .filter(msg => msg && typeof msg.content === "string" && typeof msg.role === "string")
+      .map(msg => `${msg.role === "assistant" ? "Alex" : "Cliente"}: ${msg.content}`)
+      .join("\\n\\n");
+
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 465),
+      secure: true,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      }
+    });
+
+    const subjectNeed = lead.need ? ` | ${lead.need}` : "";
+    const mailText = `Nuevo lead desde Northline Chat
+
+Nombre: ${lead.name || "No capturado"}
+Telefono: ${lead.phone || "No capturado"}
+Correo: ${lead.email || "No capturado"}
+Necesidad: ${lead.need || "No capturada"}
+
+==============================
+TRANSCRIPT COMPLETO
+==============================
+
+${transcript}
+`;
+
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: process.env.TRANSCRIPT_TO || process.env.SMTP_USER,
+      subject: `Northline Chat Lead${subjectNeed}`,
+      text: mailText
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("send-transcript error:", error);
+    return res.status(500).json({ success: false, error: "send_failed" });
   }
 });
 
