@@ -407,6 +407,65 @@ messages: messages,
 
 
 
+const sentLeadSessions = new Set();
+const sentTranscriptHashes = new Map();
+const geoCache = new Map();
+
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  const raw = Array.isArray(forwarded) ? forwarded[0] : (forwarded || req.socket?.remoteAddress || "");
+  let ip = String(raw).split(",")[0].trim();
+  ip = ip.replace(/^::ffff:/, "");
+  if (ip === "::1") ip = "127.0.0.1";
+  return ip || "Unknown";
+}
+
+function isPublicIp(ip) {
+  if (!ip || ip === "Unknown") return false;
+  if (ip === "127.0.0.1" || ip === "localhost") return false;
+  if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(ip)) return false;
+  return true;
+}
+
+async function lookupIpLocation(ip) {
+  const fallback = {
+    ip,
+    city: "Unknown",
+    region: "Unknown",
+    country: "Unknown",
+    timezone: "Unknown",
+    isp: "Unknown"
+  };
+
+  if (!isPublicIp(ip)) return fallback;
+  if (geoCache.has(ip)) return geoCache.get(ip);
+
+  try {
+    const response = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,message,country,regionName,city,timezone,isp,query`);
+    if (!response.ok) throw new Error(`Geo lookup failed ${response.status}`);
+    const data = await response.json();
+    if (!data || data.status !== "success") throw new Error(data?.message || "Geo lookup failed");
+
+    const result = {
+      ip: data.query || ip,
+      city: data.city || "Unknown",
+      region: data.regionName || "Unknown",
+      country: data.country || "Unknown",
+      timezone: data.timezone || "Unknown",
+      isp: data.isp || "Unknown"
+    };
+    geoCache.set(ip, result);
+    return result;
+  } catch (error) {
+    console.error("geo lookup error:", error.message);
+    return fallback;
+  }
+}
+
+function normalizeText(value) {
+  return String(value || "").trim();
+}
+
 function extractLeadInfo(conversation = []) {
   const allUserText = conversation
     .filter(msg => msg && msg.role === "user" && typeof msg.content === "string")
@@ -440,7 +499,7 @@ function extractLeadInfo(conversation = []) {
       msg &&
       msg.role === "user" &&
       typeof msg.content === "string" &&
-      /hmi|plc|motor|sensor|heater|heater|botes|botes industriales|pantalla|cotiz|quote|packaging|mixer|molding/i.test(msg.content)
+      /hmi|plc|motor|sensor|heater|bote|botella|envase|pantalla|cotiz|quote|precio|price|stock|inventario|disponible|packaging|mixer|molding|maple|allen|bradley|siemens|omron|yaskawa/i.test(msg.content)
     ) {
       need = msg.content.trim();
       break;
@@ -455,54 +514,156 @@ function extractLeadInfo(conversation = []) {
   };
 }
 
+function hasLeadIntent(conversation = [], lead = {}) {
+  const userText = conversation
+    .filter(msg => msg && msg.role === "user" && typeof msg.content === "string")
+    .map(msg => msg.content.toLowerCase())
+    .join("\n");
+
+  const intent = /(cotiz|cotiza|quote|pricing|precio|price|stock|inventario|disponible|availability|available|comprar|buy|necesito|i need|request|rfq)/i.test(userText);
+  const product = /(hmi|plc|motor|sensor|heater|bote|botella|envase|pantalla|maple|allen|bradley|siemens|omron|yaskawa|part number|número de parte|numero de parte|packaging|mixer|molding)/i.test(userText);
+  const contact = Boolean(lead.email || lead.phone || lead.name);
+
+  return Boolean((intent && product) || (intent && contact) || (product && contact));
+}
+
+function formatTranscript(conversation = []) {
+  return conversation
+    .filter(msg => msg && typeof msg.content === "string" && typeof msg.role === "string")
+    .map(msg => `${msg.role === "assistant" ? "Alex" : "Cliente"}: ${msg.content}`)
+    .join("\n\n");
+}
+
+function formatVisitorInfo(visitor = {}, geo = {}) {
+  return `VISITOR INFO
+==============================
+IP: ${geo.ip || visitor.ip || "Unknown"}
+City: ${geo.city || "Unknown"}
+Region: ${geo.region || "Unknown"}
+Country: ${geo.country || "Unknown"}
+Timezone: ${geo.timezone || "Unknown"}
+ISP: ${geo.isp || "Unknown"}
+
+Page: ${visitor.page || "Unknown"}
+Referrer: ${visitor.referrer || "Direct / Unknown"}
+Browser/Device: ${visitor.userAgent || "Unknown"}
+Language: ${visitor.language || "Unknown"}
+Screen: ${visitor.screen || "Unknown"}
+Client Time: ${visitor.clientTime || "Unknown"}
+Server Time: ${new Date().toISOString()}`;
+}
+
+function createTransporter() {
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 465),
+    secure: true,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    }
+  });
+}
+
+function getSessionId(reqBody = {}) {
+  return normalizeText(reqBody.sessionId) || `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function hashContent(value) {
+  let hash = 0;
+  const text = String(value || "");
+  for (let i = 0; i < text.length; i++) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(i);
+    hash |= 0;
+  }
+  return String(hash);
+}
+
 app.post("/api/send-transcript", async (req, res) => {
   try {
-    const { conversation } = req.body || {};
+    const { conversation, visitorInfo = {}, eventType = "update" } = req.body || {};
 
     if (!Array.isArray(conversation) || conversation.length === 0) {
       return res.status(400).json({ success: false, error: "Missing conversation" });
     }
 
+    const sessionId = getSessionId(req.body || {});
+    const clientIp = getClientIp(req);
+    const geo = await lookupIpLocation(clientIp);
+    const visitor = {
+      ...visitorInfo,
+      ip: clientIp
+    };
+
     const lead = extractLeadInfo(conversation);
+    const transcript = formatTranscript(conversation);
+    const visitorBlock = formatVisitorInfo(visitor, geo);
+    const transporter = createTransporter();
+    const to = process.env.TRANSCRIPT_TO || process.env.SMTP_USER;
+    const from = process.env.SMTP_FROM || process.env.SMTP_USER;
 
-    const transcript = conversation
-      .filter(msg => msg && typeof msg.content === "string" && typeof msg.role === "string")
-      .map(msg => `${msg.role === "assistant" ? "Alex" : "Cliente"}: ${msg.content}`)
-      .join("\\n\\n");
+    const transcriptBody = `Northline Industrial Supply - Web Chat Transcript
 
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 465),
-      secure: true,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-      }
-    });
+Session ID: ${sessionId}
+Event Type: ${eventType}
 
-    const subjectNeed = lead.need ? ` | ${lead.need}` : "";
-    const mailText = `Nuevo lead desde Northline Chat
-
-Nombre: ${lead.name || "No capturado"}
-Telefono: ${lead.phone || "No capturado"}
-Correo: ${lead.email || "No capturado"}
-Necesidad: ${lead.need || "No capturada"}
+${visitorBlock}
 
 ==============================
-TRANSCRIPT COMPLETO
+FULL TRANSCRIPT
 ==============================
 
 ${transcript}
 `;
 
-    await transporter.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
-      to: process.env.TRANSCRIPT_TO || process.env.SMTP_USER,
-      subject: `Northline Chat Lead${subjectNeed}`,
-      text: mailText
-    });
+    const transcriptHash = hashContent(transcriptBody);
+    const lastHash = sentTranscriptHashes.get(sessionId);
 
-    return res.json({ success: true });
+    let transcriptSent = false;
+    if (lastHash !== transcriptHash) {
+      await transporter.sendMail({
+        from,
+        to,
+        subject: `WEB CHAT TRANSCRIPT - ${sessionId}`,
+        text: transcriptBody
+      });
+      sentTranscriptHashes.set(sessionId, transcriptHash);
+      transcriptSent = true;
+    }
+
+    let leadSent = false;
+    if (hasLeadIntent(conversation, lead) && !sentLeadSessions.has(sessionId)) {
+      const leadBody = `WEB CHAT RFQ LEAD - NORTHLINE INDUSTRIAL
+========================================
+
+Submitted: ${new Date().toISOString()}
+Session ID: ${sessionId}
+
+Name: ${lead.name || "Not captured"}
+Company: Not captured
+Email: ${lead.email || "Not captured"}
+Phone: ${lead.phone || "Not captured"}
+Need / Product: ${lead.need || "Not captured"}
+
+${visitorBlock}
+
+Notes:
+Lead was detected automatically from the web chat conversation.
+Full transcript was sent separately.
+`;
+
+      const subjectNeed = lead.need ? ` - ${lead.need.slice(0, 80)}` : "";
+      await transporter.sendMail({
+        from,
+        to,
+        subject: `WEB CHAT RFQ LEAD${subjectNeed}`,
+        text: leadBody
+      });
+      sentLeadSessions.add(sessionId);
+      leadSent = true;
+    }
+
+    return res.json({ success: true, transcriptSent, leadSent });
   } catch (error) {
     console.error("send-transcript error:", error);
     return res.status(500).json({ success: false, error: "send_failed" });
