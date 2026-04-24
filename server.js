@@ -7,7 +7,8 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
+app.use(express.text({ type: "text/plain", limit: "1mb" }));
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -407,7 +408,6 @@ messages: messages,
 
 
 
-
 function extractLeadInfo(conversation = []) {
   const allUserText = conversation
     .filter(msg => msg && msg.role === "user" && typeof msg.content === "string")
@@ -441,7 +441,7 @@ function extractLeadInfo(conversation = []) {
       msg &&
       msg.role === "user" &&
       typeof msg.content === "string" &&
-      /hmi|plc|motor|sensor|heater|calentador|botes|botes industriales|pantalla|maple|cotiz|quote|precio|stock|inventario|disponible|packaging|mixer|molding/i.test(msg.content)
+      /hmi|plc|motor|sensor|heater|heater|botes|botes industriales|pantalla|cotiz|quote|packaging|mixer|molding/i.test(msg.content)
     ) {
       need = msg.content.trim();
       break;
@@ -456,15 +456,16 @@ function extractLeadInfo(conversation = []) {
   };
 }
 
-function hasLeadIntent(conversation = []) {
-  const allUserText = conversation
-    .filter(msg => msg && msg.role === "user" && typeof msg.content === "string")
-    .map(msg => msg.content.toLowerCase())
-    .join("\n");
 
-  const commercialIntent = /(cotiz|quote|precio|price|cost|compr|buy|stock|inventario|disponible|availability|available|necesito|need|busco|looking for|mandame|send me)/i.test(allUserText);
-  const productIntent = /(hmi|plc|motor|sensor|heater|calentador|pantalla|maple|allen|bradley|siemens|omron|yaskawa|keyence|banner|ifm|sick|bote|packaging|mixer|molding)/i.test(allUserText);
-  return commercialIntent && productIntent;
+function getPayload(req) {
+  if (typeof req.body === "string") {
+    try {
+      return JSON.parse(req.body);
+    } catch (error) {
+      return {};
+    }
+  }
+  return req.body || {};
 }
 
 function getClientIp(req) {
@@ -473,117 +474,117 @@ function getClientIp(req) {
   return String(raw).split(",")[0].trim().replace(/^::ffff:/, "");
 }
 
-function isPublicIp(ip) {
-  if (!ip || ip === "::1" || ip === "127.0.0.1" || ip.startsWith("10.") || ip.startsWith("192.168.") || /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) {
-    return false;
-  }
-  return true;
-}
+async function getGeoInfo(ip) {
+  const empty = {
+    ip: ip || "Not available",
+    city: "Not available",
+    region: "Not available",
+    country: "Not available",
+    timezone: "Not available"
+  };
 
-async function getIpLocation(ip) {
-  const empty = { city: "Unknown", region: "Unknown", country: "Unknown", timezone: "Unknown", isp: "Unknown" };
+  if (!ip || ip === "::1" || ip === "127.0.0.1" || ip.startsWith("10.") || ip.startsWith("192.168.")) {
+    return empty;
+  }
+
   try {
-    if (!isPublicIp(ip)) return empty;
-    const response = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,regionName,city,timezone,isp`);
+    const response = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,message,country,regionName,city,timezone,query`);
     if (!response.ok) return empty;
     const data = await response.json();
     if (!data || data.status !== "success") return empty;
     return {
-      city: data.city || "Unknown",
-      region: data.regionName || "Unknown",
-      country: data.country || "Unknown",
-      timezone: data.timezone || "Unknown",
-      isp: data.isp || "Unknown"
+      ip: data.query || ip,
+      city: data.city || "Not available",
+      region: data.regionName || "Not available",
+      country: data.country || "Not available",
+      timezone: data.timezone || "Not available"
     };
   } catch (error) {
-    console.error("ip location error:", error);
     return empty;
   }
 }
 
-function createTransporter() {
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 465),
-    secure: Number(process.env.SMTP_PORT || 465) === 465,
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS
-    }
-  });
-}
-
-function formatVisitorInfo(visitor = {}, ip = "", location = {}) {
+function formatVisitorInfo(visitor = {}, geo = {}) {
   return `==============================
 VISITOR INFO
 ==============================
 
-IP: ${ip || "Unknown"}
-City: ${location.city || "Unknown"}
-Region: ${location.region || "Unknown"}
-Country: ${location.country || "Unknown"}
-Timezone: ${location.timezone || "Unknown"}
-ISP: ${location.isp || "Unknown"}
+IP: ${geo.ip || "Not available"}
+City: ${geo.city || "Not available"}
+Region: ${geo.region || "Not available"}
+Country: ${geo.country || "Not available"}
+Timezone: ${geo.timezone || "Not available"}
 
-Page: ${visitor.page || "Unknown"}
-Referrer: ${visitor.referrer || "Unknown"}
-Language: ${visitor.language || "Unknown"}
-Screen: ${visitor.screen || "Unknown"}
-Device / Browser: ${visitor.userAgent || "Unknown"}
+Page: ${visitor.page || "Not available"}
+Referrer: ${visitor.referrer || "Not available"}
+Language: ${visitor.language || "Not available"}
+Screen: ${visitor.screen || "Not available"}
+User Agent: ${visitor.userAgent || "Not available"}
 Timestamp: ${visitor.timestamp || new Date().toISOString()}
-`;
+Event: ${visitor.event || "Not available"}`;
+}
+
+function hasLeadIntent(conversation = []) {
+  const userText = conversation
+    .filter(msg => msg && msg.role === "user" && typeof msg.content === "string")
+    .map(msg => msg.content)
+    .join("\n")
+    .toLowerCase();
+
+  const intent = /(cotiz|quote|precio|price|cost|compr|buy|purchase|stock|inventario|available|availability|disponible|necesito|need|requiero|pantalla|hmi|plc|motor|sensor|heater|maple|allen|siemens|omron|yaskawa|qty|cantidad|piezas|pieces)/i.test(userText);
+  return intent;
 }
 
 app.post("/api/send-transcript", async (req, res) => {
   try {
-    const { conversation, visitor } = req.body || {};
+    const payload = getPayload(req);
+    const { conversation, visitor } = payload || {};
 
     if (!Array.isArray(conversation) || conversation.length === 0) {
       return res.status(400).json({ success: false, error: "Missing conversation" });
     }
 
-    const cleanConversation = conversation.filter(msg =>
-      msg && typeof msg.content === "string" && typeof msg.role === "string" && msg.content.trim()
-    );
+    const lead = extractLeadInfo(conversation);
+    const clientIp = getClientIp(req);
+    const geo = await getGeoInfo(clientIp);
+    const visitorInfo = formatVisitorInfo(visitor || {}, geo);
 
-    if (cleanConversation.length === 0) {
-      return res.status(400).json({ success: false, error: "Empty conversation" });
-    }
-
-    const ip = getClientIp(req);
-    const location = await getIpLocation(ip);
-    const lead = extractLeadInfo(cleanConversation);
-    const visitorInfo = formatVisitorInfo(visitor || {}, ip, location);
-
-    const transcript = cleanConversation
+    const transcript = conversation
+      .filter(msg => msg && typeof msg.content === "string" && typeof msg.role === "string")
       .map(msg => `${msg.role === "assistant" ? "Alex" : "Cliente"}: ${msg.content}`)
       .join("\n\n");
 
-    const transporter = createTransporter();
-    const to = process.env.TRANSCRIPT_TO || process.env.SMTP_USER;
-    const from = process.env.SMTP_FROM || process.env.SMTP_USER;
-    const pageLabel = visitor?.page ? ` | ${visitor.page}` : "";
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 465),
+      secure: true,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      }
+    });
 
-    await transporter.sendMail({
-      from,
-      to,
-      subject: `Northline Chat Transcript${pageLabel}`,
-      text: `${visitorInfo}
+    const transcriptText = `Northline Chat Transcript
+
+${visitorInfo}
 
 ==============================
 TRANSCRIPT COMPLETO
 ==============================
 
 ${transcript}
-`
+`;
+
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: process.env.TRANSCRIPT_TO || process.env.SMTP_USER,
+      subject: `Northline Chat Transcript | ${geo.city || "Unknown"} | ${visitor?.page || "Website"}`,
+      text: transcriptText
     });
 
-    if (hasLeadIntent(cleanConversation)) {
-      await transporter.sendMail({
-        from,
-        to,
-        subject: `Northline RFQ Lead${lead.need ? ` | ${lead.need}` : ""}`,
-        text: `Nuevo lead desde Northline Chat
+    let leadSent = false;
+    if (hasLeadIntent(conversation)) {
+      const leadText = `Northline RFQ Lead
 
 Nombre: ${lead.name || "No capturado"}
 Telefono: ${lead.phone || "No capturado"}
@@ -591,11 +592,19 @@ Correo: ${lead.email || "No capturado"}
 Necesidad: ${lead.need || "No capturada"}
 
 ${visitorInfo}
-`
+`;
+
+      const subjectNeed = lead.need ? ` | ${lead.need.slice(0, 80)}` : "";
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        to: process.env.TRANSCRIPT_TO || process.env.SMTP_USER,
+        subject: `Northline RFQ Lead${subjectNeed}`,
+        text: leadText
       });
+      leadSent = true;
     }
 
-    return res.json({ success: true });
+    return res.json({ success: true, leadSent });
   } catch (error) {
     console.error("send-transcript error:", error);
     return res.status(500).json({ success: false, error: "send_failed" });
