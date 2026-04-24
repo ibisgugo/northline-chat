@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import OpenAI from "openai";
+import nodemailer from "nodemailer";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -581,35 +582,36 @@ Client Timestamp: ${visitor?.timestamp || "Not captured"}`;
 }
 
 async function sendResendEmail({ subject, text }) {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    throw new Error("Missing RESEND_API_KEY");
-  }
-
-  const from = process.env.RESEND_FROM || "Northline Chat <sales@northlinepro.com>";
+  const host = process.env.SMTP_HOST || "smtp.gmail.com";
+  const port = Number(process.env.SMTP_PORT || 587);
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const from = process.env.SMTP_FROM || `Northline <${user}>`;
   const to = process.env.TRANSCRIPT_TO || "sales@northlinepro.com";
 
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      from,
-      to: [to],
-      subject,
-      text
-    })
-  });
-
-  const responseText = await response.text();
-  if (!response.ok) {
-    throw new Error(`Resend API error ${response.status}: ${responseText}`);
+  if (!user || !pass) {
+    throw new Error("Missing SMTP_USER or SMTP_PASS");
   }
 
-  console.log("Resend email sent:", subject);
-  return responseText;
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000
+  });
+
+  const info = await transporter.sendMail({
+    from,
+    to,
+    subject,
+    text
+  });
+
+  console.log("SMTP email sent:", subject, info.messageId || "");
+  return info;
 }
 
 
@@ -776,6 +778,42 @@ ${cityLine}`
   }
 });
 
+
+
+
+app.get("/api/email-debug", (req, res) => {
+  res.json({
+    ok: true,
+    smtpConfigVisible: {
+      SMTP_HOST: process.env.SMTP_HOST || "smtp.gmail.com",
+      SMTP_PORT: process.env.SMTP_PORT || "587",
+      SMTP_USER: process.env.SMTP_USER || "missing",
+      SMTP_PASS: Boolean(process.env.SMTP_PASS),
+      SMTP_FROM: process.env.SMTP_FROM || "missing",
+      TRANSCRIPT_TO: process.env.TRANSCRIPT_TO || "missing"
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get("/api/email-test", async (req, res) => {
+  try {
+    const id = buildReadableId("TEST");
+    await sendResendEmail({
+      subject: `${id} | EMAIL TEST`,
+      text: `NORTHLINE EMAIL TEST
+==============================
+
+ID: ${id}
+Transport: Google Workspace SMTP
+Timestamp: ${new Date().toISOString()}`
+    });
+    res.json({ success: true, emailSent: true, id });
+  } catch (error) {
+    console.error("email-test error:", error);
+    res.status(500).json({ success: false, error: "email_test_failed", detail: error.message });
+  }
+});
 
 
 app.listen(port, () => {
