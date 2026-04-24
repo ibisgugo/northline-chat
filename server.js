@@ -6,7 +6,8 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
+app.use(express.text({ type: "text/plain", limit: "1mb" }));
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -528,9 +529,48 @@ async function sendResendEmail({ subject, text }) {
   return responseText;
 }
 
+
+function normalizeTranscriptBody(req) {
+  if (typeof req.body === "string") {
+    try {
+      return JSON.parse(req.body);
+    } catch (error) {
+      return {};
+    }
+  }
+  if (req.body && typeof req.body === "object") {
+    return req.body;
+  }
+  return {};
+}
+
+app.post("/api/email-test", async (req, res) => {
+  try {
+    const body = normalizeTranscriptBody(req);
+    const visitorInfo = buildVisitorInfo(req, body.visitor || {});
+    const timestamp = new Date().toISOString();
+
+    await sendResendEmail({
+      subject: `Northline Chat Email Test - ${timestamp}`,
+      text: `EMAIL TEST FROM NORTHLINE CHAT
+==============================
+
+This confirms Railway can send email through Resend.
+
+Trigger: ${body.event || "chat_opened"}
+${visitorInfo}`
+    });
+
+    return res.json({ success: true, emailSent: true });
+  } catch (error) {
+    console.error("email-test error:", error);
+    return res.status(500).json({ success: false, error: "email_test_failed", detail: error.message });
+  }
+});
+
 app.post("/api/send-transcript", async (req, res) => {
   try {
-    const body = req.body || {};
+    const body = normalizeTranscriptBody(req);
     const conversation = Array.isArray(body.conversation) ? body.conversation : [];
 
     if (conversation.length === 0) {
@@ -572,7 +612,6 @@ ${visitorInfo}`
   }
 });
 
-app.listen
 app.listen(port, () => {
   console.log("Server running");
 });
