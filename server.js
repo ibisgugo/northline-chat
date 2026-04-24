@@ -1,7 +1,6 @@
 import express from "express";
 import cors from "cors";
 import OpenAI from "openai";
-import nodemailer from "nodemailer";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -394,18 +393,6 @@ messages: messages,
 
     const reply = response.choices[0].message.content;
 
-    const fullConversation = [
-      ...safeConversation,
-      { role: "user", content: message },
-      { role: "assistant", content: reply }
-    ];
-
-    sendChatEmails({
-      conversation: fullConversation,
-      req,
-      visitor: req.body?.visitor || req.body?.visitorInfo || {}
-    }).catch(error => console.error("auto transcript error:", error));
-
     res.json({ reply });
 
   } catch (error) {
@@ -468,49 +455,12 @@ function extractLeadInfo(conversation = []) {
 }
 
 
-
 function getClientIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
   if (typeof forwarded === "string" && forwarded.trim()) {
     return forwarded.split(",")[0].trim();
   }
   return (req.headers["x-real-ip"] || req.socket?.remoteAddress || "").toString();
-}
-
-async function lookupIpLocation(ip) {
-  try {
-    if (!ip || ip === "::1" || ip === "127.0.0.1" || ip.startsWith("10.") || ip.startsWith("192.168.")) {
-      return null;
-    }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 1800);
-    const cleanIp = ip.replace(/^::ffff:/, "");
-    const response = await fetch(`http://ip-api.com/json/${encodeURIComponent(cleanIp)}?fields=status,country,regionName,city,timezone,query`, {
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    if (!response.ok) return null;
-    const data = await response.json();
-    if (!data || data.status !== "success") return null;
-    return data;
-  } catch (error) {
-    return null;
-  }
-}
-
-function createMailTransporter() {
-  const smtpHost = process.env.SMTP_HOST || "smtp.gmail.com";
-  const smtpPort = Number(process.env.SMTP_PORT || 465);
-  console.log("SMTP host:", smtpHost);
-  return nodemailer.createTransport({
-    host: smtpHost,
-    port: smtpPort,
-    secure: smtpPort === 465,
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS
-    }
-  });
 }
 
 function formatTranscript(conversation = []) {
@@ -526,58 +476,56 @@ function hasLeadIntent(conversation = [], lead = {}) {
     .map(msg => msg.content)
     .join("\n")
     .toLowerCase();
+
   return Boolean(
     lead.need ||
     lead.email ||
     lead.phone ||
-    /cotiz|quote|precio|price|stock|disponible|inventario|compr|necesito|pantalla|hmi|plc|motor|sensor|heater|maple/.test(text)
+    /cotiz|quote|precio|price|stock|disponible|inventario|compr|necesito|pantalla|hmi|plc|motor|sensor|heater|maple|cantidad|qty|rfq/.test(text)
   );
 }
 
-async function sendChatEmails({ conversation = [], req, visitor = {}, forceLead = false }) {
-  if (!Array.isArray(conversation) || conversation.length === 0) return;
-
+function buildVisitorInfo(req, visitor = {}) {
   const ip = getClientIp(req);
-  const location = await lookupIpLocation(ip);
-  const lead = extractLeadInfo(conversation);
-  const transcript = formatTranscript(conversation);
-  const transporter = createMailTransporter();
-
-  const visitorInfo = `VISITOR INFO
+  return `VISITOR INFO
 ==============================
 IP: ${ip || "Not captured"}
-City: ${location?.city || "Not captured"}
-Region: ${location?.regionName || "Not captured"}
-Country: ${location?.country || "Not captured"}
-Timezone: ${location?.timezone || "Not captured"}
 Page: ${visitor?.page || visitor?.url || "Not captured"}
 Device / Browser: ${visitor?.userAgent || req.headers["user-agent"] || "Not captured"}
 Language: ${visitor?.language || req.headers["accept-language"] || "Not captured"}
 Timestamp: ${new Date().toISOString()}`;
+}
 
-  await transporter.sendMail({
-    from: process.env.SMTP_FROM || process.env.SMTP_USER,
-    to: process.env.TRANSCRIPT_TO || process.env.SMTP_USER,
-    subject: `Northline Chat Transcript - ${new Date().toISOString()}`,
-    text: `${visitorInfo}\n\n==============================\nTRANSCRIPT COMPLETO\n==============================\n\n${transcript}`
+async function sendResendEmail({ subject, text }) {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    throw new Error("Missing RESEND_API_KEY");
+  }
+
+  const from = process.env.RESEND_FROM || "Northline Chat <sales@northlinepro.com>";
+  const to = process.env.TRANSCRIPT_TO || "sales@northlinepro.com";
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      from,
+      to: [to],
+      subject,
+      text
+    })
   });
 
-  if (forceLead || hasLeadIntent(conversation, lead)) {
-    await transporter.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
-      to: process.env.TRANSCRIPT_TO || process.env.SMTP_USER,
-      subject: `Northline RFQ Lead${lead.need ? " | " + lead.need : ""}`,
-      text: `NUEVO LEAD / RFQ DESDE NORTHLINE CHAT
-==============================
-
-Nombre: ${lead.name || "No capturado"}
-Telefono: ${lead.phone || "No capturado"}
-Correo: ${lead.email || "No capturado"}
-Necesidad: ${lead.need || "No capturada"}
-
-${visitorInfo}`
-    });
+  const responseText = await response.text();
+  if (!response.ok) {
+    throw new Error(`Resend API error ${response.status}: ${responseText}`);
   }
+
+  console.log("Resend email sent:", subject);
+  return responseText;
 }
 
 app.post("/api/send-transcript", async (req, res) => {
@@ -590,20 +538,41 @@ app.post("/api/send-transcript", async (req, res) => {
       return res.json({ success: true, skipped: true, reason: "empty_conversation" });
     }
 
-    await sendChatEmails({
-      conversation,
-      req,
-      visitor: body.visitor || body.visitorInfo || {},
-      forceLead: false
+    const lead = extractLeadInfo(conversation);
+    const transcript = formatTranscript(conversation);
+    const visitorInfo = buildVisitorInfo(req, body.visitor || body.visitorInfo || {});
+    const timestamp = new Date().toISOString();
+
+    await sendResendEmail({
+      subject: `Northline Chat Transcript - ${timestamp}`,
+      text: `${visitorInfo}\n\n==============================\nTRANSCRIPT COMPLETO\n==============================\n\n${transcript}`
     });
 
-    return res.json({ success: true });
+    let leadSent = false;
+    if (hasLeadIntent(conversation, lead)) {
+      await sendResendEmail({
+        subject: `Northline RFQ Lead${lead.need ? " | " + lead.need : ""}`,
+        text: `NUEVO LEAD / RFQ DESDE NORTHLINE CHAT
+==============================
+
+Nombre: ${lead.name || "No capturado"}
+Telefono: ${lead.phone || "No capturado"}
+Correo: ${lead.email || "No capturado"}
+Necesidad: ${lead.need || "No capturada"}
+
+${visitorInfo}`
+      });
+      leadSent = true;
+    }
+
+    return res.json({ success: true, transcriptSent: true, leadSent });
   } catch (error) {
     console.error("send-transcript error:", error);
-    return res.status(500).json({ success: false, error: "send_failed" });
+    return res.status(500).json({ success: false, error: "send_failed", detail: error.message });
   }
 });
 
+app.listen
 app.listen(port, () => {
   console.log("Server running");
 });
