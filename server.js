@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import OpenAI from "openai";
+import nodemailer from "nodemailer";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -497,14 +498,56 @@ Language: ${visitor?.language || req.headers["accept-language"] || "Not captured
 Timestamp: ${new Date().toISOString()}`;
 }
 
-async function sendResendEmail({ subject, text }) {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    throw new Error("Missing RESEND_API_KEY");
+function cleanEnv(name) {
+  return (process.env[name] || "").toString().trim();
+}
+
+function getMailConfigStatus() {
+  return {
+    RESEND_API_KEY: Boolean(cleanEnv("RESEND_API_KEY")),
+    RESEND_FROM: cleanEnv("RESEND_FROM") || "missing",
+    TRANSCRIPT_TO: cleanEnv("TRANSCRIPT_TO") || "missing",
+    SMTP_HOST: cleanEnv("SMTP_HOST") || "missing",
+    SMTP_PORT: cleanEnv("SMTP_PORT") || "missing",
+    SMTP_USER: cleanEnv("SMTP_USER") || "missing",
+    SMTP_PASS: Boolean(cleanEnv("SMTP_PASS")),
+    SMTP_FROM: cleanEnv("SMTP_FROM") || "missing"
+  };
+}
+
+async function sendSmtpEmail({ subject, text }) {
+  const host = cleanEnv("SMTP_HOST");
+  const portValue = Number(cleanEnv("SMTP_PORT") || 587);
+  const user = cleanEnv("SMTP_USER");
+  const pass = cleanEnv("SMTP_PASS");
+  const from = cleanEnv("SMTP_FROM") || user;
+  const to = cleanEnv("TRANSCRIPT_TO") || "sales@northlinepro.com";
+
+  if (!host || !user || !pass) {
+    throw new Error("Missing SMTP config");
   }
 
-  const from = process.env.RESEND_FROM || "Northline Chat <sales@northlinepro.com>";
-  const to = process.env.TRANSCRIPT_TO || "sales@northlinepro.com";
+  const transporter = nodemailer.createTransport({
+    host,
+    port: portValue,
+    secure: portValue === 465,
+    auth: { user, pass }
+  });
+
+  const info = await transporter.sendMail({ from, to, subject, text });
+  console.log("SMTP email sent:", subject, info.messageId || "no-message-id");
+  return info;
+}
+
+async function sendResendEmail({ subject, text }) {
+  const apiKey = cleanEnv("RESEND_API_KEY");
+  const from = cleanEnv("RESEND_FROM") || "Northline Chat <sales@northlinepro.com>";
+  const to = cleanEnv("TRANSCRIPT_TO") || "sales@northlinepro.com";
+
+  if (!apiKey) {
+    console.log("RESEND_API_KEY not visible to app. Falling back to SMTP.", getMailConfigStatus());
+    return sendSmtpEmail({ subject, text });
+  }
 
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -522,7 +565,9 @@ async function sendResendEmail({ subject, text }) {
 
   const responseText = await response.text();
   if (!response.ok) {
-    throw new Error(`Resend API error ${response.status}: ${responseText}`);
+    console.error(`Resend failed ${response.status}: ${responseText}`);
+    console.log("Falling back to SMTP.", getMailConfigStatus());
+    return sendSmtpEmail({ subject, text });
   }
 
   console.log("Resend email sent:", subject);
@@ -543,6 +588,15 @@ function normalizeTranscriptBody(req) {
   }
   return {};
 }
+
+
+app.get("/api/email-debug", (req, res) => {
+  res.json({
+    ok: true,
+    mailConfigVisible: getMailConfigStatus(),
+    timestamp: new Date().toISOString()
+  });
+});
 
 app.post("/api/email-test", async (req, res) => {
   try {
@@ -614,4 +668,5 @@ ${visitorInfo}`
 
 app.listen(port, () => {
   console.log("Server running");
+  console.log("Mail config visible:", getMailConfigStatus());
 });
