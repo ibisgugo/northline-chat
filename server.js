@@ -598,7 +598,7 @@ app.get("/api/email-debug", (req, res) => {
   });
 });
 
-app.post("/api/email-test", async (req, res) => {
+async function handleEmailTest(req, res) {
   try {
     const body = normalizeTranscriptBody(req);
     const visitorInfo = buildVisitorInfo(req, body.visitor || {});
@@ -609,18 +609,21 @@ app.post("/api/email-test", async (req, res) => {
       text: `EMAIL TEST FROM NORTHLINE CHAT
 ==============================
 
-This confirms Railway can send email through Resend.
+This confirms Railway can send email through Resend or SMTP fallback.
 
-Trigger: ${body.event || "chat_opened"}
+Trigger: ${body.event || "manual_test"}
 ${visitorInfo}`
     });
 
-    return res.json({ success: true, emailSent: true });
+    return res.json({ success: true, emailSent: true, message: "Email test sent" });
   } catch (error) {
     console.error("email-test error:", error);
     return res.status(500).json({ success: false, error: "email_test_failed", detail: error.message });
   }
-});
+}
+
+app.get("/api/email-test", handleEmailTest);
+app.post("/api/email-test", handleEmailTest);
 
 app.post("/api/send-transcript", async (req, res) => {
   try {
