@@ -580,36 +580,91 @@ Server Timestamp: ${new Date().toISOString()}
 Client Timestamp: ${visitor?.timestamp || "Not captured"}`;
 }
 
-async function sendResendEmail({ subject, text }) {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    throw new Error("Missing RESEND_API_KEY");
+function base64UrlEncode(value) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function buildRawEmail({ from, to, subject, text }) {
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`;
+  const message = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${encodedSubject}`,
+    "MIME-Version: 1.0",
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    text
+  ].join("\r\n");
+
+  return base64UrlEncode(message);
+}
+
+async function getGoogleAccessToken() {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error("Missing GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, or GOOGLE_REFRESH_TOKEN");
   }
 
-  const from = process.env.RESEND_FROM || "Northline Chat <sales@northlinepro.com>";
-  const to = process.env.TRANSCRIPT_TO || "sales@northlinepro.com";
-
-  const response = await fetch("https://api.resend.com/emails", {
+  const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      from,
-      to: [to],
-      subject,
-      text
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token"
     })
   });
 
-  const responseText = await response.text();
-  if (!response.ok) {
-    throw new Error(`Resend API error ${response.status}: ${responseText}`);
+  const data = await response.json();
+
+  if (!response.ok || !data.access_token) {
+    throw new Error(`Google token error ${response.status}: ${JSON.stringify(data)}`);
   }
 
-  console.log("Resend email sent:", subject);
-  return responseText;
+  return data.access_token;
+}
+
+async function sendResendEmail({ subject, text }) {
+  const fromEmail = process.env.GMAIL_FROM || "sales@northlinepro.com";
+  const fromName = process.env.GMAIL_FROM_NAME || "Northline";
+  const from = `${fromName} <${fromEmail}>`;
+  const to = process.env.TRANSCRIPT_TO || "sales@northlinepro.com";
+
+  const accessToken = await getGoogleAccessToken();
+
+  const raw = buildRawEmail({
+    from,
+    to,
+    subject,
+    text
+  });
+
+  const response = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ raw })
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(`Gmail API send error ${response.status}: ${JSON.stringify(data)}`);
+  }
+
+  console.log("Gmail API email sent:", subject, data.id || "");
+  return data;
 }
 
 
@@ -776,6 +831,118 @@ ${cityLine}`
   }
 });
 
+
+
+
+app.get("/api/google-debug", (req, res) => {
+  res.json({
+    ok: true,
+    googleConfigVisible: {
+      GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ? "present" : "missing",
+      GOOGLE_CLIENT_SECRET: Boolean(process.env.GOOGLE_CLIENT_SECRET),
+      GOOGLE_REFRESH_TOKEN: Boolean(process.env.GOOGLE_REFRESH_TOKEN),
+      GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI || "missing",
+      GMAIL_FROM: process.env.GMAIL_FROM || "missing",
+      GMAIL_FROM_NAME: process.env.GMAIL_FROM_NAME || "Northline",
+      TRANSCRIPT_TO: process.env.TRANSCRIPT_TO || "missing"
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get("/api/google-auth-url", (req, res) => {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const redirectUri = process.env.GOOGLE_REDIRECT_URI;
+
+  if (!clientId || !redirectUri) {
+    return res.status(500).json({
+      success: false,
+      error: "missing_google_oauth_config",
+      required: ["GOOGLE_CLIENT_ID", "GOOGLE_REDIRECT_URI"]
+    });
+  }
+
+  const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  url.searchParams.set("client_id", clientId);
+  url.searchParams.set("redirect_uri", redirectUri);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope", "https://www.googleapis.com/auth/gmail.send");
+  url.searchParams.set("access_type", "offline");
+  url.searchParams.set("prompt", "consent");
+
+  res.json({ success: true, authUrl: url.toString() });
+});
+
+app.get("/api/google-callback", async (req, res) => {
+  try {
+    const code = req.query.code;
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    const redirectUri = process.env.GOOGLE_REDIRECT_URI;
+
+    if (!code) {
+      return res.status(400).send("Missing code");
+    }
+
+    if (!clientId || !clientSecret || !redirectUri) {
+      return res.status(500).send("Missing GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, or GOOGLE_REDIRECT_URI");
+    }
+
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code: String(code),
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code"
+      })
+    });
+
+    const tokenData = await tokenResponse.json();
+
+    if (!tokenResponse.ok) {
+      return res.status(500).send(`<pre>Google token error:\n${JSON.stringify(tokenData, null, 2)}</pre>`);
+    }
+
+    const refreshToken = tokenData.refresh_token || "";
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(`<!doctype html>
+<html>
+<head><title>Northline Google Token</title></head>
+<body style="font-family:Arial;padding:24px;line-height:1.5">
+<h2>Google authorization completed</h2>
+<p>Copy this value into Railway as <b>GOOGLE_REFRESH_TOKEN</b>:</p>
+<textarea style="width:100%;height:120px;font-family:monospace">${refreshToken}</textarea>
+<p>If the box is empty, open <code>/api/google-auth-url</code> again and authorize with prompt=consent.</p>
+</body>
+</html>`);
+  } catch (error) {
+    console.error("google-callback error:", error);
+    res.status(500).send(`<pre>${error.message}</pre>`);
+  }
+});
+
+app.get("/api/email-test", async (req, res) => {
+  try {
+    const id = buildReadableId("TEST");
+    await sendResendEmail({
+      subject: `${id} | GMAIL API TEST`,
+      text: `NORTHLINE GMAIL API TEST
+==============================
+
+ID: ${id}
+Transport: Gmail API HTTPS
+Timestamp: ${new Date().toISOString()}`
+    });
+    res.json({ success: true, emailSent: true, id });
+  } catch (error) {
+    console.error("email-test error:", error);
+    res.status(500).json({ success: false, error: "email_test_failed", detail: error.message });
+  }
+});
 
 
 app.listen(port, () => {
