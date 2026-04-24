@@ -9,6 +9,18 @@ app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.text({ type: "text/plain", limit: "1mb" }));
 
+function buildReadableId(prefix) {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${prefix}-${yyyy}${mm}${dd}-${hh}${min}${ss}`;
+}
+
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -614,15 +626,17 @@ app.post("/api/send-transcript", async (req, res) => {
     const transcript = formatTranscript(conversation);
     const visitorInfo = await buildVisitorInfo(req, body.visitor || body.visitorInfo || {});
     const timestamp = new Date().toISOString();
+    const emailId = buildReadableId("NL");
 
     // EMAIL 1: Full transcript / audit copy. Always sent when there is a real conversation.
     await sendResendEmail({
-      subject: `Northline Chat Transcript - ${timestamp}`,
+      subject: `${emailId} | TRANSCRIPT`,
       text: `${visitorInfo}
 
 ==============================
 LEAD INFO
 ==============================
+ID: ${emailId}
 Nombre: ${lead.name || "No capturado"}
 Telefono: ${lead.phone || "No capturado"}
 Correo: ${lead.email || "No capturado"}
@@ -854,10 +868,11 @@ ${transcript}`
       const cityLine = visitorLines.find(line => line.startsWith("City:")) || "City: Not captured";
 
       await sendResendEmail({
-        subject: `Northline RFQ Request${products.length ? " | " + products[0].name : ""}`,
+        subject: `${emailId} | RFQ${products.length ? " | " + products[0].name : ""}`${products.length ? " | " + products[0].name : ""}`,
         text: `NORTHLINE RFQ REQUEST
 ==============================
 
+ID: ${emailId}
 Nombre: ${cleanName || "No capturado"}
 Correo: ${cleanEmail || "No capturado"}
 Teléfono: ${cleanPhone || "No capturado"}
