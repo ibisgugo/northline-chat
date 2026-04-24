@@ -394,6 +394,18 @@ messages: messages,
 
     const reply = response.choices[0].message.content;
 
+    const fullConversation = [
+      ...safeConversation,
+      { role: "user", content: message },
+      { role: "assistant", content: reply }
+    ];
+
+    sendChatEmails({
+      conversation: fullConversation,
+      req,
+      visitor: req.body?.visitor || req.body?.visitorInfo || {}
+    }).catch(error => console.error("auto transcript error:", error));
+
     res.json({ reply });
 
   } catch (error) {
@@ -455,51 +467,134 @@ function extractLeadInfo(conversation = []) {
   };
 }
 
-app.post("/api/send-transcript", async (req, res) => {
+
+
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim();
+  }
+  return (req.headers["x-real-ip"] || req.socket?.remoteAddress || "").toString();
+}
+
+async function lookupIpLocation(ip) {
   try {
-    const { conversation } = req.body || {};
-
-    if (!Array.isArray(conversation) || conversation.length === 0) {
-      return res.status(400).json({ success: false, error: "Missing conversation" });
+    if (!ip || ip === "::1" || ip === "127.0.0.1" || ip.startsWith("10.") || ip.startsWith("192.168.")) {
+      return null;
     }
-
-    const lead = extractLeadInfo(conversation);
-
-    const transcript = conversation
-      .filter(msg => msg && typeof msg.content === "string" && typeof msg.role === "string")
-      .map(msg => `${msg.role === "assistant" ? "Alex" : "Cliente"}: ${msg.content}`)
-      .join("\\n\\n");
-
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || "smtp.gmail.com",
-      port: Number(process.env.SMTP_PORT || 465),
-      secure: true,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-      }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1800);
+    const cleanIp = ip.replace(/^::ffff:/, "");
+    const response = await fetch(`http://ip-api.com/json/${encodeURIComponent(cleanIp)}?fields=status,country,regionName,city,timezone,query`, {
+      signal: controller.signal
     });
+    clearTimeout(timer);
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (!data || data.status !== "success") return null;
+    return data;
+  } catch (error) {
+    return null;
+  }
+}
 
-    const subjectNeed = lead.need ? ` | ${lead.need}` : "";
-    const mailText = `Nuevo lead desde Northline Chat
+function createMailTransporter() {
+  const smtpHost = process.env.SMTP_HOST || "smtp.gmail.com";
+  const smtpPort = Number(process.env.SMTP_PORT || 465);
+  console.log("SMTP host:", smtpHost);
+  return nodemailer.createTransport({
+    host: smtpHost,
+    port: smtpPort,
+    secure: smtpPort === 465,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    }
+  });
+}
+
+function formatTranscript(conversation = []) {
+  return conversation
+    .filter(msg => msg && typeof msg.content === "string" && typeof msg.role === "string")
+    .map(msg => `${msg.role === "assistant" ? "Alex" : "Cliente"}: ${msg.content}`)
+    .join("\n\n");
+}
+
+function hasLeadIntent(conversation = [], lead = {}) {
+  const text = conversation
+    .filter(msg => msg && typeof msg.content === "string")
+    .map(msg => msg.content)
+    .join("\n")
+    .toLowerCase();
+  return Boolean(
+    lead.need ||
+    lead.email ||
+    lead.phone ||
+    /cotiz|quote|precio|price|stock|disponible|inventario|compr|necesito|pantalla|hmi|plc|motor|sensor|heater|maple/.test(text)
+  );
+}
+
+async function sendChatEmails({ conversation = [], req, visitor = {}, forceLead = false }) {
+  if (!Array.isArray(conversation) || conversation.length === 0) return;
+
+  const ip = getClientIp(req);
+  const location = await lookupIpLocation(ip);
+  const lead = extractLeadInfo(conversation);
+  const transcript = formatTranscript(conversation);
+  const transporter = createMailTransporter();
+
+  const visitorInfo = `VISITOR INFO
+==============================
+IP: ${ip || "Not captured"}
+City: ${location?.city || "Not captured"}
+Region: ${location?.regionName || "Not captured"}
+Country: ${location?.country || "Not captured"}
+Timezone: ${location?.timezone || "Not captured"}
+Page: ${visitor?.page || visitor?.url || "Not captured"}
+Device / Browser: ${visitor?.userAgent || req.headers["user-agent"] || "Not captured"}
+Language: ${visitor?.language || req.headers["accept-language"] || "Not captured"}
+Timestamp: ${new Date().toISOString()}`;
+
+  await transporter.sendMail({
+    from: process.env.SMTP_FROM || process.env.SMTP_USER,
+    to: process.env.TRANSCRIPT_TO || process.env.SMTP_USER,
+    subject: `Northline Chat Transcript - ${new Date().toISOString()}`,
+    text: `${visitorInfo}\n\n==============================\nTRANSCRIPT COMPLETO\n==============================\n\n${transcript}`
+  });
+
+  if (forceLead || hasLeadIntent(conversation, lead)) {
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: process.env.TRANSCRIPT_TO || process.env.SMTP_USER,
+      subject: `Northline RFQ Lead${lead.need ? " | " + lead.need : ""}`,
+      text: `NUEVO LEAD / RFQ DESDE NORTHLINE CHAT
+==============================
 
 Nombre: ${lead.name || "No capturado"}
 Telefono: ${lead.phone || "No capturado"}
 Correo: ${lead.email || "No capturado"}
 Necesidad: ${lead.need || "No capturada"}
 
-==============================
-TRANSCRIPT COMPLETO
-==============================
+${visitorInfo}`
+    });
+  }
+}
 
-${transcript}
-`;
+app.post("/api/send-transcript", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const conversation = Array.isArray(body.conversation) ? body.conversation : [];
 
-    await transporter.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
-      to: process.env.TRANSCRIPT_TO || process.env.SMTP_USER,
-      subject: `Northline Chat Lead${subjectNeed}`,
-      text: mailText
+    if (conversation.length === 0) {
+      console.log("send-transcript skipped: empty conversation");
+      return res.json({ success: true, skipped: true, reason: "empty_conversation" });
+    }
+
+    await sendChatEmails({
+      conversation,
+      req,
+      visitor: body.visitor || body.visitorInfo || {},
+      forceLead: false
     });
 
     return res.json({ success: true });
@@ -511,5 +606,4 @@ ${transcript}
 
 app.listen(port, () => {
   console.log("Server running");
-  console.log("SMTP host:", process.env.SMTP_HOST || "smtp.gmail.com");
 });
