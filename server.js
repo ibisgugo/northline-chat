@@ -868,7 +868,7 @@ ${transcript}`
       const cityLine = visitorLines.find(line => line.startsWith("City:")) || "City: Not captured";
 
       await sendResendEmail({
-        subject: `${emailId} | RFQ${products.length ? " | " + products[0].name : ""}`${products.length ? " | " + products[0].name : ""}`,
+        subject: `${emailId} | RFQ${products.length ? " | " + products[0].name : ""}`,
         text: `NORTHLINE RFQ REQUEST
 ==============================
 
