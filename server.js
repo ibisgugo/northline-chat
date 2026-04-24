@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import OpenAI from "openai";
+import crypto from "crypto";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -467,8 +468,11 @@ function getClientIp(req) {
 function formatTranscript(conversation = []) {
   return conversation
     .filter(msg => msg && typeof msg.content === "string" && typeof msg.role === "string")
-    .map(msg => `${msg.role === "assistant" ? "Alex" : "Cliente"}: ${msg.content}`)
-    .join("\n\n");
+    .map(msg => {
+      const label = msg.role === "assistant" ? "Alex" : "Cliente";
+      return `${label}:\n${msg.content.trim()}`;
+    })
+    .join("\n\n------------------------------\n\n");
 }
 
 function hasLeadIntent(conversation = [], lead = {}) {
@@ -600,38 +604,91 @@ async function sendResendEmail({ subject, text }) {
   return responseText;
 }
 
-app.post("/api/send-transcript", async (req, res) => {
-  try {
-    const body = parseRequestBody(req.body || {});
-    const conversation = Array.isArray(body.conversation) ? body.conversation : [];
 
-    if (conversation.length === 0) {
-      console.log("send-transcript skipped: empty conversation");
-      return res.json({ success: true, skipped: true, reason: "empty_conversation" });
+const sentTranscriptCache = new Map();
+const SENT_CACHE_TTL_MS = 1000 * 60 * 60 * 12;
+
+function cleanupSentTranscriptCache() {
+  const now = Date.now();
+  for (const [key, value] of sentTranscriptCache.entries()) {
+    if (!value || now - value > SENT_CACHE_TTL_MS) {
+      sentTranscriptCache.delete(key);
     }
+  }
+}
 
-    const lead = extractLeadInfo(conversation);
-    const transcript = formatTranscript(conversation);
-    const visitorInfo = await buildVisitorInfo(req, body.visitor || body.visitorInfo || {});
-    const timestamp = new Date().toISOString();
+function buildTranscriptKey(req, body = {}, conversation = []) {
+  const visitor = body.visitor || body.visitorInfo || {};
+  const sessionId = body.sessionId || visitor.sessionId || visitor.chatSessionId || "";
+  const base = JSON.stringify({
+    sessionId,
+    ip: cleanIp(getClientIp(req)),
+    page: visitor.page || visitor.url || "",
+    conversation
+  });
+  return crypto.createHash("sha256").update(base).digest("hex");
+}
 
-    await sendResendEmail({
-      subject: `Northline Chat Transcript - ${timestamp}`,
-      text: `${visitorInfo}
+function hasRealUserConversation(conversation = []) {
+  return conversation.some(msg =>
+    msg &&
+    msg.role === "user" &&
+    typeof msg.content === "string" &&
+    msg.content.trim().length > 0
+  );
+}
 
-==============================
-LEAD INFO
+function formatLeadBlock(lead = {}) {
+  return `LEAD INFO
 ==============================
 Nombre: ${lead.name || "No capturado"}
 Telefono: ${lead.phone || "No capturado"}
 Correo: ${lead.email || "No capturado"}
-Necesidad: ${lead.need || "No capturada"}
+Necesidad: ${lead.need || "No capturada"}`;
+}
+
+function buildTranscriptEmailText({ visitorInfo, lead, transcript }) {
+  return `${visitorInfo}
+
+==============================
+${formatLeadBlock(lead)}
 
 ==============================
 TRANSCRIPT COMPLETO
 ==============================
 
-${transcript}`
+${transcript}`;
+}
+
+app.post("/api/send-transcript", async (req, res) => {
+  try {
+    const body = parseRequestBody(req.body || {});
+    const conversation = Array.isArray(body.conversation) ? body.conversation : [];
+
+    if (conversation.length === 0 || !hasRealUserConversation(conversation)) {
+      console.log("send-transcript skipped: no real user conversation");
+      return res.json({ success: true, skipped: true, reason: "no_real_user_conversation" });
+    }
+
+    cleanupSentTranscriptCache();
+    const transcriptKey = buildTranscriptKey(req, body, conversation);
+
+    if (sentTranscriptCache.has(transcriptKey)) {
+      console.log("send-transcript skipped: duplicate transcript");
+      return res.json({ success: true, skipped: true, reason: "duplicate_transcript" });
+    }
+
+    sentTranscriptCache.set(transcriptKey, Date.now());
+
+    const lead = extractLeadInfo(conversation);
+    const transcript = formatTranscript(conversation);
+    const visitorInfo = await buildVisitorInfo(req, body.visitor || body.visitorInfo || {});
+    const timestamp = new Date().toISOString();
+    const emailText = buildTranscriptEmailText({ visitorInfo, lead, transcript });
+
+    await sendResendEmail({
+      subject: `Northline Chat Transcript - ${timestamp}`,
+      text: emailText
     });
 
     let leadSent = false;
@@ -641,10 +698,7 @@ ${transcript}`
         text: `NUEVO LEAD / RFQ DESDE NORTHLINE CHAT
 ==============================
 
-Nombre: ${lead.name || "No capturado"}
-Telefono: ${lead.phone || "No capturado"}
-Correo: ${lead.email || "No capturado"}
-Necesidad: ${lead.need || "No capturada"}
+${formatLeadBlock(lead)}
 
 ${visitorInfo}
 
@@ -657,7 +711,12 @@ ${transcript}`
       leadSent = true;
     }
 
-    return res.json({ success: true, transcriptSent: true, leadSent });
+    return res.json({
+      success: true,
+      transcriptSent: true,
+      leadSent,
+      skipped: false
+    });
   } catch (error) {
     console.error("send-transcript error:", error);
     return res.status(500).json({ success: false, error: "send_failed", detail: error.message });
