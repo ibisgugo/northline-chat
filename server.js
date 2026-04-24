@@ -407,129 +407,54 @@ messages: messages,
 
 
 
-function titleCaseName(value = "") {
-  return String(value || "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .split(" ")
-    .filter(Boolean)
-    .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-    .join(" ");
-}
-
-function cleanCapture(value = "") {
-  return String(value || "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .replace(/[,.]+$/g, "")
-    .trim();
-}
-
-function normalizeProduct(value = "") {
-  const raw = cleanCapture(value);
-  if (!raw) return "";
-
-  if (/hmi\s*[- ]?\s*5070b/i.test(raw) || /\bhmi5070b\b/i.test(raw)) {
-    return "HMI 5070B";
-  }
-
-  return raw
-    .replace(/\bhmi\s*(\d)/i, "HMI $1")
-    .replace(/\bplc\b/i, "PLC")
-    .replace(/\bhmi\b/i, "HMI")
-    .trim();
-}
-
 function extractLeadInfo(conversation = []) {
-  const userMessages = conversation
+  const allUserText = conversation
     .filter(msg => msg && msg.role === "user" && typeof msg.content === "string")
-    .map(msg => msg.content);
+    .map(msg => msg.content)
+    .join("\n");
 
-  const allUserText = userMessages.join("\n");
-  const normalizedText = allUserText.replace(/\s+/g, " ").trim();
-
-  const emailMatch = normalizedText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  const phoneMatch = normalizedText.match(/(?:\+?\d[\d\s().-]{7,}\d)/);
+  const emailMatch = allUserText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  const phoneMatch = allUserText.match(/(?:\+?\d[\d\s().-]{7,}\d)/);
 
   let name = "";
-  const nameMatch = normalizedText.match(/(?:mi nombre es|me llamo|soy|name is)\s+(.+?)(?=\s+(?:mi correo|correo|email|mi empresa|empresa|compa[nñ][ií]a|telefono|tel[eé]fono|phone|requiero|necesito|cotiz|quote)\b|[,.]|$)/i);
-  if (nameMatch) {
-    name = titleCaseName(nameMatch[1]);
-  }
-
-  if (!name) {
-    for (let i = 0; i < conversation.length - 1; i++) {
-      const current = conversation[i];
-      const next = conversation[i + 1];
-      if (
-        current &&
-        current.role === "assistant" &&
-        typeof current.content === "string" &&
-        /nombre|name/i.test(current.content) &&
-        next &&
-        next.role === "user" &&
-        typeof next.content === "string"
-      ) {
-        name = titleCaseName(next.content);
-        break;
-      }
+  for (let i = 0; i < conversation.length - 1; i++) {
+    const current = conversation[i];
+    const next = conversation[i + 1];
+    if (
+      current &&
+      current.role === "assistant" &&
+      typeof current.content === "string" &&
+      /nombre|name/i.test(current.content) &&
+      next &&
+      next.role === "user" &&
+      typeof next.content === "string"
+    ) {
+      name = next.content.trim();
+      break;
     }
   }
 
-  let company = "";
-  const companyMatch = normalizedText.match(/(?:mi empresa es|empresa es|compa[nñ][ií]a es|company is)\s+(.+?)(?=\s+(?:mi correo|correo|email|telefono|tel[eé]fono|phone|requiero|necesito|cotiz|quote)\b|[,.]|$)/i);
-  if (companyMatch) {
-    company = cleanCapture(companyMatch[1]);
-  }
-
-  let product = "";
-  if (/hmi\s*[- ]?\s*5070b/i.test(normalizedText) || /\bhmi5070b\b/i.test(normalizedText)) {
-    product = "HMI 5070B";
-  } else {
-    const productMatch = normalizedText.match(/(?:cotizar|cotizame|cotizarme|quote|necesito|requiero)\s+(?:una|un|la|el)?\s*(.+?)(?=\s+(?:mi nombre|mi correo|correo|email|mi empresa|empresa|telefono|tel[eé]fono|phone|requiero\s+\d|cantidad|qty)\b|[,.]|$)/i);
-    if (productMatch) {
-      product = normalizeProduct(productMatch[1]);
-    }
-  }
-
-  let quantity = "";
-  const qtyMatch = normalizedText.match(/(?:requiero|necesito|cantidad|qty)\s*(?:de)?\s*(\d+)\s*(pza|pzas|pieza|piezas|pcs|unidades|unidad)?/i)
-    || normalizedText.match(/\b(\d+)\s*(pza|pzas|pieza|piezas|pcs|unidades|unidad)\b/i);
-  if (qtyMatch) {
-    const n = qtyMatch[1];
-    const unitRaw = (qtyMatch[2] || "pieza").toLowerCase();
-    let unit = /pza|pieza|pcs|unidad/.test(unitRaw) ? "pieza" : unitRaw;
-    quantity = `${n} ${unit}${n === "1" ? "" : "s"}`;
-  }
-
-  let need = product || "";
+  let need = "";
   for (const msg of conversation) {
     if (
       msg &&
       msg.role === "user" &&
       typeof msg.content === "string" &&
-      /hmi|plc|motor|sensor|heater|botes|botes industriales|pantalla|cotiz|quote|packaging|mixer|molding/i.test(msg.content)
+      /hmi|plc|motor|sensor|heater|heater|botes|botes industriales|pantalla|cotiz|quote|packaging|mixer|molding/i.test(msg.content)
     ) {
-      if (!need) need = cleanCapture(msg.content);
+      need = msg.content.trim();
       break;
     }
   }
 
-  const notes = product
-    ? `Cliente solicita cotización de ${product}${quantity ? ` (${quantity})` : ""}.`
-    : (need ? `Cliente solicita cotización / revisión: ${need}.` : "No capturadas");
-
   return {
     name,
     email: emailMatch ? emailMatch[0] : "",
-    phone: phoneMatch ? cleanCapture(phoneMatch[0]) : "",
-    company,
-    product,
-    quantity,
-    need,
-    notes
+    phone: phoneMatch ? phoneMatch[0] : "",
+    need
   };
 }
+
 
 function getClientIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
@@ -643,13 +568,6 @@ Server Timestamp: ${new Date().toISOString()}
 Client Timestamp: ${visitor?.timestamp || "Not captured"}`;
 }
 
-
-function visitorInfoField(visitorInfo = "", label = "") {
-  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = String(visitorInfo || "").match(new RegExp(`^${escaped}:\\\\s*(.*)$`, "mi"));
-  return match ? match[1].trim() : "Not captured";
-}
-
 async function sendResendEmail({ subject, text }) {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
@@ -697,10 +615,18 @@ app.post("/api/send-transcript", async (req, res) => {
     const visitorInfo = await buildVisitorInfo(req, body.visitor || body.visitorInfo || {});
     const timestamp = new Date().toISOString();
 
-    // EMAIL 1: full transcript / audit trail. Always sent when there is a real conversation.
+    // EMAIL 1: Full transcript / audit copy. Always sent when there is a real conversation.
     await sendResendEmail({
       subject: `Northline Chat Transcript - ${timestamp}`,
       text: `${visitorInfo}
+
+==============================
+LEAD INFO
+==============================
+Nombre: ${lead.name || "No capturado"}
+Telefono: ${lead.phone || "No capturado"}
+Correo: ${lead.email || "No capturado"}
+Necesidad: ${lead.need || "No capturada"}
 
 ==============================
 TRANSCRIPT COMPLETO
@@ -709,37 +635,247 @@ TRANSCRIPT COMPLETO
 ${transcript}`
     });
 
-    // EMAIL 2: clean RFQ only. No transcript here.
+    // EMAIL 2: Clean RFQ / lead copy. No transcript here.
     let leadSent = false;
     if (hasLeadIntent(conversation, lead)) {
-      const ip = visitorInfoField(visitorInfo, "IP");
-      const city = visitorInfoField(visitorInfo, "City");
+      const userText = conversation
+        .filter(msg => msg && msg.role === "user" && typeof msg.content === "string")
+        .map(msg => msg.content)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
 
-      const rfqText = `NORTHLINE RFQ REQUEST
+      const assistantText = conversation
+        .filter(msg => msg && msg.role === "assistant" && typeof msg.content === "string")
+        .map(msg => msg.content)
+        .join("\n")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      const combinedText = `${userText} ${assistantText}`.replace(/\s+/g, " ").trim();
+
+      const emailMatch = combinedText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+      const phoneMatch = combinedText.match(/(?:\+?\d[\d\s().-]{7,}\d)/);
+
+      function titleCaseName(value = "") {
+        return value
+          .trim()
+          .replace(/\s+/g, " ")
+          .split(" ")
+          .filter(Boolean)
+          .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+          .join(" ");
+      }
+
+      function cleanField(value = "") {
+        return value
+          .replace(/\s+(mi|my|correo|email|empresa|company|telefono|teléfono|phone|requiero|necesito|cantidad|qty|producto|productos|los productos).*$/i, "")
+          .replace(/[.;,]+$/g, "")
+          .trim();
+      }
+
+      let cleanName = lead.name || "";
+      const namePatterns = [
+        /(?:tu nombre|nombre)\s*[:\-]\s*([a-záéíóúüñ]+(?:\s+[a-záéíóúüñ]+){0,3})/i,
+        /(?:mi nombre es|nombre es|soy|me llamo)\s+([a-záéíóúüñ]+(?:\s+[a-záéíóúüñ]+){0,3})/i,
+        /(?:name is|my name is|i am)\s+([a-z]+(?:\s+[a-z]+){0,3})/i
+      ];
+
+      for (const pattern of namePatterns) {
+        const match = combinedText.match(pattern);
+        if (match && match[1]) {
+          cleanName = cleanField(match[1]);
+          break;
+        }
+      }
+
+      cleanName = cleanName ? titleCaseName(cleanName) : "";
+
+      let company = "";
+      const companyPatterns = [
+        /(?:empresa)\s*[:\-]\s*([a-z0-9&.\- ]{1,40})/i,
+        /(?:mi empresa es|empresa es|compañ[ií]a es|company is)\s+([a-z0-9&.\- ]{1,40})/i,
+        /(?:company)\s*[:\-]\s*([a-z0-9&.\- ]{1,40})/i
+      ];
+
+      for (const pattern of companyPatterns) {
+        const match = combinedText.match(pattern);
+        if (match && match[1]) {
+          company = cleanField(match[1]);
+          break;
+        }
+      }
+
+      company = company
+        ? company
+            .split(/\s+/)
+            .map(part => part.length <= 3 ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+            .join(" ")
+        : "";
+
+      function normalizeProductName(raw = "") {
+        let value = raw
+          .replace(/\s+/g, " ")
+          .replace(/[.;]+$/g, "")
+          .replace(/\by\b$/i, "")
+          .trim();
+
+        value = value
+          .replace(/\bhmi\s*[- ]?\s*5070b\b/i, "HMI 5070B")
+          .replace(/\bhmi5070b\b/i, "HMI 5070B")
+          .replace(/\bplc\b/ig, "PLC")
+          .replace(/\bhmi\b/ig, "HMI")
+          .replace(/\ballen[\s-]?bradley\b/ig, "Allen-Bradley")
+          .replace(/\bdayton\b/ig, "Dayton");
+
+        return value.trim();
+      }
+
+      function normalizeQuantity(qty = "", unit = "") {
+        const n = String(qty || "").trim();
+        if (!n) return "";
+        const u = String(unit || "").trim().toLowerCase();
+
+        if (/pza|pzas|pieza|piezas|pc|pcs/.test(u)) {
+          return `${n} pieza${n === "1" ? "" : "s"}`;
+        }
+
+        return `${n} pieza${n === "1" ? "" : "s"}`;
+      }
+
+      function addProduct(products, name, qty = "", unit = "") {
+        const clean = normalizeProductName(name);
+        if (!clean || clean.length < 2) return;
+
+        const blocked = /^(mi|my|correo|email|empresa|company|telefono|teléfono|phone|nombre|name|requiero|necesito|cantidad|qty)$/i;
+        if (blocked.test(clean)) return;
+
+        const quantity = normalizeQuantity(qty, unit);
+        const key = clean.toLowerCase();
+
+        const existing = products.find(p => p.name.toLowerCase() === key);
+        if (existing) {
+          if (quantity) existing.quantity = quantity;
+          return;
+        }
+
+        products.push({ name: clean, quantity });
+      }
+
+      function parseProductsFromText(text = "") {
+        const products = [];
+        const source = text.replace(/\s+/g, " ").trim();
+
+        // Prefer Alex's structured summary when available:
+        // "Los productos: pantalla HMI5070B, 2 PLC Allen-Bradley 45H434H y un motor Dayton."
+        const summaryMatch =
+          source.match(/(?:los productos|productos|producto)\s*[:\-]\s*([^.\n]+?)(?:\.|$)/i) ||
+          source.match(/(?:producto|product)\s*[:\-]\s*([^.\n]+?)(?:\.|$)/i);
+
+        const productSegment = summaryMatch && summaryMatch[1] ? summaryMatch[1] : source;
+
+        const normalizedSegment = productSegment
+          .replace(/\s+y\s+/gi, ", ")
+          .replace(/\s+and\s+/gi, ", ");
+
+        const parts = normalizedSegment
+          .split(",")
+          .map(x => x.trim())
+          .filter(Boolean);
+
+        for (const part of parts) {
+          let m;
+
+          m = part.match(/^(?:una|un|la|el)?\s*(pantalla\s+)?(hmi\s*[- ]?\s*5070b|hmi5070b)\b/i);
+          if (m) {
+            addProduct(products, "HMI 5070B", "1", "pieza");
+            continue;
+          }
+
+          m = part.match(/^(\d+)\s*(pza|pzas|pieza|piezas|pc|pcs)?\s*(plc\s+allen[\s-]?bradley\s+[a-z0-9\-\/]+|plc\s+[a-z0-9\-\/ ]+|allen[\s-]?bradley\s+[a-z0-9\-\/]+)/i);
+          if (m) {
+            addProduct(products, m[3], m[1], m[2]);
+            continue;
+          }
+
+          m = part.match(/^(?:un|una|el|la)?\s*(motor\s+dayton|dayton\s+motor|motor\s+[a-z0-9\-\/ ]+)/i);
+          if (m) {
+            addProduct(products, m[1], "1", "pieza");
+            continue;
+          }
+
+          m = part.match(/^(\d+)\s*(pza|pzas|pieza|piezas|pc|pcs)?\s*([a-z0-9][a-z0-9\-\/ ]{2,60})/i);
+          if (m) {
+            addProduct(products, m[3], m[1], m[2]);
+            continue;
+          }
+        }
+
+        // Safety scan across full text for known patterns even if list parsing missed them.
+        const full = source;
+        const hmiMatches = full.match(/\b(?:pantalla\s+)?(?:hmi\s*[- ]?\s*5070b|hmi5070b)\b/ig) || [];
+        if (hmiMatches.length) {
+          const qtyNearHmi = full.match(/(?:requiero|necesito|cantidad)?\s*(\d+)\s*(pza|pzas|pieza|piezas|pc|pcs)?\s*(?:de\s+)?(?:pantalla\s+)?(?:hmi\s*[- ]?\s*5070b|hmi5070b)/i);
+          addProduct(products, "HMI 5070B", qtyNearHmi ? qtyNearHmi[1] : "1", qtyNearHmi ? qtyNearHmi[2] : "pieza");
+        }
+
+        const plcMatches = [...full.matchAll(/\b(\d+)?\s*(pza|pzas|pieza|piezas|pc|pcs)?\s*(PLC\s+Allen[\s-]?Bradley\s+[A-Z0-9\-\/]+|PLC\s+[A-Z0-9\-\/]+|Allen[\s-]?Bradley\s+[A-Z0-9\-\/]+)/ig)];
+        for (const m of plcMatches) {
+          addProduct(products, m[3], m[1] || "1", m[2] || "pieza");
+        }
+
+        const motorMatches = [...full.matchAll(/\b(?:un|una|1)?\s*(motor\s+Dayton|Dayton\s+motor)\b/ig)];
+        for (const m of motorMatches) {
+          addProduct(products, m[1], "1", "pieza");
+        }
+
+        return products;
+      }
+
+      const products = parseProductsFromText(assistantText || userText);
+      if (products.length === 0) {
+        const fallbackProduct = lead.need ? lead.need : "";
+        if (fallbackProduct) addProduct(products, fallbackProduct, "", "");
+      }
+
+      const productLines = products.length
+        ? products.map(p => `- ${p.name}${p.quantity ? ` (${p.quantity})` : ""}`).join("\n")
+        : "- No capturado";
+
+      const notes = products.length
+        ? `Cliente solicita cotización de ${products.map(p => `${p.name}${p.quantity ? ` (${p.quantity})` : ""}`).join(", ")}.`
+        : "Cliente solicita cotización.";
+
+      const cleanEmail = emailMatch ? emailMatch[0] : (lead.email || "");
+      const cleanPhone = phoneMatch ? phoneMatch[0].trim() : (lead.phone || "");
+
+      const visitorLines = visitorInfo.split("\n");
+      const ipLine = visitorLines.find(line => line.startsWith("IP:")) || "IP: Not captured";
+      const cityLine = visitorLines.find(line => line.startsWith("City:")) || "City: Not captured";
+
+      await sendResendEmail({
+        subject: `Northline RFQ Request${products.length ? " | " + products[0].name : ""}`,
+        text: `NORTHLINE RFQ REQUEST
 ==============================
 
-Nombre: ${lead.name || "No capturado"}
-Correo: ${lead.email || "No capturado"}
-Teléfono: ${lead.phone || "No capturado"}
-Empresa: ${lead.company || "No capturado"}
-Producto: ${lead.product || lead.need || "No capturado"}
-Cantidad: ${lead.quantity || "No capturada"}
+Nombre: ${cleanName || "No capturado"}
+Correo: ${cleanEmail || "No capturado"}
+Teléfono: ${cleanPhone || "No capturado"}
+Empresa: ${company || "No capturado"}
+Producto(s):
+${productLines}
 
 ------------------------------
 
 Notas:
-${lead.notes || "No capturadas"}
+${notes}
 
 ------------------------------
 
 VISITOR INFO
 ==============================
-IP: ${ip}
-City: ${city}`;
-
-      await sendResendEmail({
-        subject: `Northline RFQ Lead${lead.product ? " | " + lead.product : ""}`,
-        text: rfqText
+${ipLine}
+${cityLine}`
       });
       leadSent = true;
     }
@@ -751,36 +887,7 @@ City: ${city}`;
   }
 });
 
-app.get("/api/email-debug", (req, res) => {
-  res.json({
-    ok: true,
-    mailConfigVisible: {
-      RESEND_API_KEY: Boolean(process.env.RESEND_API_KEY),
-      RESEND_FROM: process.env.RESEND_FROM || "missing",
-      TRANSCRIPT_TO: process.env.TRANSCRIPT_TO || "missing"
-    },
-    timestamp: new Date().toISOString()
-  });
-});
 
-app.get("/api/email-test", async (req, res) => {
-  try {
-    await sendResendEmail({
-      subject: `Northline Chat Email Test - ${new Date().toISOString()}`,
-      text: `EMAIL TEST FROM NORTHLINE CHAT
-==============================
-
-This confirms Railway can send email through Resend.
-
-Trigger: manual_test
-Timestamp: ${new Date().toISOString()}`
-    });
-    res.json({ success: true, emailSent: true, message: "Email test sent" });
-  } catch (error) {
-    console.error("email-test error:", error);
-    res.status(500).json({ success: false, error: "email_test_failed", detail: error.message });
-  }
-});
 
 app.listen(port, () => {
   console.log("Server running");
